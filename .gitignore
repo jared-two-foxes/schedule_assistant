@@ -1,0 +1,19 @@
+/target
+**/*.rs.bk
+*.lock
+
+# ignore a live config
+Rocket.toml
+
+# ignore test database
+.data
+
+# editor stuff
+.vscode
+.idea
+
+# development cert.pem and key.pem
+*.pem
+.gitsecret/keys/random_seed
+!*.secret
+.env
