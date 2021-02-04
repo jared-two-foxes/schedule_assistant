@@ -15,6 +15,7 @@ use lettre_email::{mime, EmailBuilder};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -270,12 +271,9 @@ fn main() {
     let smtp_address = env::var("SMTP_ADDRESS").expect("SMTP_ADDRESS not found");
     let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME not found");
     let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD not found");
-    let mut mailer = SmtpClient::new_simple(smtp_address)
+    let mut mailer = SmtpClient::new_simple(&smtp_address)
         .unwrap()
-        .credentials(Credentials::new(
-            smtp_username.into(),
-            smtp_password.into(),
-        ))
+        .credentials(Credentials::new(smtp_username.into(), smtp_password.into()))
         .transport();
 
     // Grab all of the opportunities.
