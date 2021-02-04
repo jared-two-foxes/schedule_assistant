@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::env;
 use url::Url;
 use uuid::Uuid;
@@ -11,7 +12,7 @@ mod date_format {
     use chrono::{DateTime, TimeZone, Utc};
     use serde::{self, Deserialize, Deserializer, Serializer};
 
-    const FORMAT: &'static str = "%Y-%m-%d %H:%M:%S";
+    const FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
     pub fn serialize<S>(date: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -42,17 +43,17 @@ pub struct Job {
     pub status: String,
 }
 
-pub fn get_clients() -> Result<serde_json::Value, reqwest::Error> {
+pub fn get_clients() -> Result<Value, reqwest::Error> {
     let url = format!("{}/company.json", BASE_URL);
     get(&url)
 }
 
-pub fn get_client(uuid: &str) -> Result<serde_json::Value, reqwest::Error> {
+pub fn get_client(uuid: &str) -> Result<Value, reqwest::Error> {
     let url = format!("{}/company/{}.json", BASE_URL, uuid);
     get(&url)
 }
 
-pub fn get_jobs(filter: Option<&str>) -> Result<serde_json::Value, reqwest::Error> {
+pub fn get_jobs(filter: Option<&str>) -> Result<Value, reqwest::Error> {
     let url = match filter {
         Some(f) => format!("{}/job.json?$filter={}", BASE_URL, f),
         _ => format!("{}/job.json", BASE_URL),
@@ -60,20 +61,29 @@ pub fn get_jobs(filter: Option<&str>) -> Result<serde_json::Value, reqwest::Erro
     get(&url)
 }
 
-pub fn get_job(uuid: &str) -> Result<serde_json::Value, reqwest::Error> {
+pub fn get_job(uuid: &str) -> Result<Value, reqwest::Error> {
     let url = format!("{}/job/{}.json", BASE_URL, uuid);
     get(&url)
 }
 
 pub fn update_jobs(
     uuid: &str,
-    value: serde_json::Value,
-) -> Result<serde_json::Value, reqwest::Error> {
+    value: Value,
+) -> Result<Value, reqwest::Error> {
     let url = format!("{}/job/{}.json", BASE_URL, uuid);
     post(&url, value)
 }
 
-pub fn get(url: &str) -> Result<serde_json::Value, reqwest::Error> {
+pub fn get_job_activities(filter: Option<&str>) -> Result<Value, reqwest::Error> {
+    let url = match filter {
+        Some(f) => format!("{}/jobactivity.json?$filter={}", BASE_URL, f),
+        _ => format!("{}/jobactivity.json", BASE_URL),
+    };
+    get(&url)
+}
+
+
+pub fn get(url: &str) -> Result<Value, reqwest::Error> {
     let username = env::var("SERVICEM8_USERNAME").expect("SERVICEM8_USERNAME not found");
     let password = env::var("SERVICEM8_PASSWORD").expect("SERVICEM8_PASSWORD not found");
     let encoded_url = Url::parse(&url).unwrap();
@@ -86,7 +96,7 @@ pub fn get(url: &str) -> Result<serde_json::Value, reqwest::Error> {
     response.json()
 }
 
-pub fn post(url: &str, post: serde_json::Value) -> Result<serde_json::Value, reqwest::Error> {
+pub fn post(url: &str, post: Value) -> Result<Value, reqwest::Error> {
     let username = env::var("SERVICEM8_USERNAME").expect("SERVICEM8_USERNAME not found");
     let password = env::var("SERVICEM8_PASSWORD").expect("SERVICEM8_PASSWORD not found");
     let encoded_url = Url::parse(&url).unwrap();
