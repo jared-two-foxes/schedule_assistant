@@ -1,4 +1,3 @@
-use currentrms;
 
 //@todo Add the ability to do some basic filtering here, like passing through that we only 
 //      want active opportunities or something.

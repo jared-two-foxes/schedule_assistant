@@ -1,64 +1,21 @@
-use chrono::{DateTime, Duration, Local};
-use dotenv;
-use reqwest::blocking::Client;
-use std::{cmp, env};
-use url::Url;
+//
+//
+// TODO:
+// 1. Need to handle pre-specified client required delivery times.
+// 2. Need to store the any timing windows required by the client somewhere, somehow.  This needs to be independant of servicem8 and
+//      if a window of an extended period the algorithm only needs to ensure that the found path falls somewhere in that time.
 
+use chrono::{DateTime, Duration, Local};
+use std::cmp;
+
+mod comms;
+mod geolocate;
 mod retrieve;
 
-static HOME_ADDRESS: &'static str = "44b Henderson Valley Road, Henderson, Auckland";
+static HOME_ADDRESS: &str = "44b Henderson Valley Road, Henderson, Auckland";
 static HOME_PT: (f64, f64) = (174.62852, -36.886249);
 
-fn geolocate(location: &str) -> reqwest::Result<serde_json::Value> {
-    let decoded_url = format!(
-        "{}/geocoding/v5/{}/{}.json?access_token={}",
-        "http://api.mapbox.com",
-        "mapbox.places",
-        location,
-        env::var("MAPBOX_ACCESS_TOKEN").expect("MAPBOX_ACCESS_TOKEN not found")
-    );
-    let encoded_url = Url::parse(&decoded_url).unwrap();
-    let client = Client::new();
-    let response = client.get(encoded_url).send()?;
-
-    response.json()
-}
-
-fn locate(location: &str) -> Option<(f64, f64)> {
-    let json = geolocate(&location).ok()?;
-
-    // Features is an array! Assume the first element is the one we want.
-    let center = &json["features"][0]["center"];
-
-    // Grab the coordinates and dump them.
-    Some((center[0].as_f64()?, center[1].as_f64()?))
-}
-
-fn directions(coordinates: &[(f64, f64)]) -> reqwest::Result<serde_json::Value> {
-    //@todo: Need to url-encode the coordinates?
-    let coords = coordinates
-        .into_iter()
-        .map(|x| format!("{},{}", x.0, x.1))
-        .collect::<Vec<_>>()
-        .join(";");
-    let url = format!(
-        "{}/directions/v5/{}/{}/{}?alternatives=false&steps=false&access_token={}",
-        "https://api.mapbox.com",
-        "mapbox",
-        "driving",
-        coords,
-        env::var("MAPBOX_ACCESS_TOKEN").expect("MAPBOX_ACCESS_TOKEN not found")
-    );
-    let encoded_url = Url::parse(&url).unwrap();
-
-    let client = Client::new();
-    let response = client.get(encoded_url).send()?;
-
-    //println!( "{:?}", &response );
-    response.json()
-}
-
-fn extract_address(o: &serde_json::Value) -> Option<String> {
+fn extract_address(o: &serde_json::Value) -> String {
     let destination = &o["destination"];
     let address = &destination["address"];
     let street = address["street"].as_str().unwrap_or("");
@@ -68,7 +25,7 @@ fn extract_address(o: &serde_json::Value) -> Option<String> {
 
     let out = format!("{},{},{},{}", street, city, county, postcode);
 
-    Some(out)
+    out
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,8 +49,8 @@ struct SearchNode {
 }
 
 fn create_job(opportunity: &serde_json::Value, job_type: JobType) -> Option<Job> {
-    let address = extract_address(&opportunity)?;
-    let location = locate(&address)?;
+    let address = extract_address(&opportunity);
+    let location = geolocate::locate(&address)?;
 
     Some(Job {
         address,
@@ -101,6 +58,56 @@ fn create_job(opportunity: &serde_json::Value, job_type: JobType) -> Option<Job>
         job_type,
         reserve: Duration::minutes(30),
     })
+}
+
+
+// Inject the required warehouse stops for this route?
+//   1. We go to the warehouse between any collection and delivery.
+fn validate_route(route: &[usize], jobs: &[Job]) -> Vec<usize> {
+    let mut validated_route = Vec::<usize>::new();
+    for i in 0..route.len() {
+        let insert = match validated_route.last() {
+            Some(j) => {
+                let w = *j;
+                let v = jobs[w].job_type == JobType::Collection;
+                let y = jobs[i].job_type != JobType::Collection;
+                v && y
+            }
+            None => true,
+        };
+
+        if insert {
+            validated_route.push(jobs.len() - 1); //< Placeholder for home...
+        }
+        validated_route.push(i);
+    }
+
+    // And finally return to the warehouse at the end of the route.
+    validated_route.push(jobs.len() - 1);
+    validated_route
+}
+
+fn calculate_route_distance(route: &[usize], edges: &[SearchNode], jobs: &[Job]) -> Duration {
+    let mut r = Duration::seconds(0);
+    for i in 0..(route.len() - 1) {
+        for e in edges {
+            if e.edge.0 == cmp::min(route[i], route[i + 1])
+                && e.edge.1 == cmp::max(route[i], route[i + 1])
+            {
+                r = r + e.value + jobs[route[i]].reserve;
+            }
+        }
+    }
+
+    // And finally add the elapsed time of the final job
+    if route.len() > 1 {
+        let i = route[route.len() - 1];
+        if jobs[route[i - 1]].job_type == JobType::Collection {
+            // Add unpacking time. (30min..?)
+            r = r + jobs[i].reserve;
+        }
+    }
+    r
 }
 
 fn main() {
@@ -164,10 +171,10 @@ fn main() {
 
             // We also need the distance between each of these sets of waypoints
             let coords = [jobs[i].location, jobs[j].location];
-            let value = match directions(&coords) {
+            let value = match geolocate::directions(&coords) {
                 Ok(json) => {
                     // Parse the returned json string to extrat the distance and time values.
-                    //assert( json["code"].as_str().unwrap() == "Okay" );
+                    assert!( json["code"].as_str().unwrap() == "Okay" );
                     let routes = &json["routes"];
 
                     //@note:  Do we care about any other routes other than the first?
@@ -195,23 +202,17 @@ fn main() {
         }
     }
 
-    //Find the shortest path that travels to all of the nodes with the smallest time taken as possible
-    //@note: Lets just brute force this for now. [jared.watt]
+    // Find the shortest path that travels to all of the nodes with the smallest time taken as possible
     let length = jobs.len() - 1; //< because we dont want to include the home point in this.
-    let mut pts = vec![0; length];
+    let mut pts = Vec::with_capacity(length);
     for i in 0..length {
-        pts[i] = i;
+        pts.push(i);
     }
     let mut c = vec![0; length];
     let mut i = 0;
     println!("{:?}", pts);
     let mut route = validate_route(&pts, &jobs);
     let mut minimum_distance = calculate_route_distance(&route, &combinations, &jobs);
-    // println!(
-    //     "{:?}, {}",
-    //     route,
-    //     minimum_distance.num_seconds() as f64 / 60.0
-    // );
 
     while i < length {
         if c[i] < i {
@@ -232,11 +233,11 @@ fn main() {
                 route = r;
             }
 
-            c[i] = c[i] + 1;
+            c[i] += 1;
             i = 0;
         } else {
             c[i] = 0;
-            i = i + 1;
+            i += 1;
         }
     }
 
@@ -245,53 +246,4 @@ fn main() {
         route,
         minimum_distance.num_seconds() as f64 / 60.0
     );
-}
-
-// Inject the required warehouse stops for this route?
-//   1. We go to the warehouse between any collection and delivery.
-fn validate_route(route: &[usize], jobs: &[Job]) -> Vec<usize> {
-    let mut validated_route = Vec::<usize>::new();
-    for i in 0..route.len() {
-        let insert = match validated_route.last() {
-            Some(j) => {
-                let w = j.clone();
-                let v = jobs[w].job_type == JobType::Collection;
-                let y = jobs[i].job_type != JobType::Collection;
-                v && y
-            }
-            None => true,
-        };
-
-        if insert {
-            validated_route.push(jobs.len() - 1); //< Placeholder for home...
-        }
-        validated_route.push(i);
-    }
-
-    // and return the truck to the warehouse
-    validated_route.push(jobs.len() - 1);
-    validated_route
-}
-
-fn calculate_route_distance(route: &[usize], edges: &[SearchNode], jobs: &[Job]) -> Duration {
-    let mut r = Duration::seconds(0);
-    for i in 0..(route.len() - 1) {
-        for e in edges {
-            if e.edge.0 == cmp::min(route[i], route[i + 1])
-                && e.edge.1 == cmp::max(route[i], route[i + 1])
-            {
-                r = r + e.value + jobs[route[i]].reserve;
-            }
-        }
-    }
-
-    // And finally add the elapsed time of the final job
-    if route.len() > 1 {
-        let i = route[route.len() - 1];
-        if jobs[route[i - 1]].job_type == JobType::Collection {
-            // Add unpacking time. (30min..?)
-            r = r + jobs[i].reserve;
-        }
-    }
-    r
 }
