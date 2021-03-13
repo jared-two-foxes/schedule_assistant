@@ -126,6 +126,11 @@ pub fn opportunity_within_date_range(op: &Value, start: &Date<Utc>, end: &Date<U
 }
 
 
+pub fn opportunity_is_confirmed(op: &Value) -> bool {
+    op["state"].as_u64().unwrap_or(0) == 3 
+}
+
+
 // Job contacts should only be those associated with this job.
 fn opportunity_matches_job(
     opportunity: &Value,

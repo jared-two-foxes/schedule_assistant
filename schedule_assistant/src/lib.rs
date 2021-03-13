@@ -14,7 +14,10 @@ pub fn check_bookings(start: Date<Utc>, end: Date<Utc>) -> reqwest::Result<Vec<V
     // Get Current-RMS opportunities.
     let opportunities = current_rms::opportunities()?
         .into_iter()
-        .filter(|opportunity| current_rms::opportunity_within_date_range(opportunity, &start, &end).unwrap())
+        .filter(|opportunity| {
+            current_rms::opportunity_is_confirmed(opportunity)
+                && current_rms::opportunity_within_date_range(opportunity, &start, &end).unwrap()
+        })
         .collect::<Vec<Value>>();
 
     // Get ServiceM8 data that we're going to need.
@@ -27,7 +30,15 @@ pub fn check_bookings(start: Date<Utc>, end: Date<Utc>) -> reqwest::Result<Vec<V
     // Activities for delivery & collection.
     let unscheduled = opportunities
         .into_iter()
-        .filter(|opportunity| !current_rms::opportunity_has_job(&opportunity, &jobs, &clients, &job_contacts, &job_activities))
+        .filter(|opportunity| {
+            !current_rms::opportunity_has_job(
+                &opportunity,
+                &jobs,
+                &clients,
+                &job_contacts,
+                &job_activities,
+            )
+        })
         .collect::<Vec<Value>>();
 
     Ok(unscheduled)
