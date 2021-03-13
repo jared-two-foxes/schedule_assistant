@@ -1,4 +1,4 @@
 [workspace]
 members = [
-    "currentrms", "distance", "servicem8", "schedule", "email"
+    "check", "distance", "schedule", "email", "schedule_assistant", "assistant", "remove_quotes"
 ]

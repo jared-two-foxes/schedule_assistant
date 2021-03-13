@@ -7,119 +7,19 @@
 // Option to send all emails to jared@twofoxes.co.nz to check first
 // download pickinglists from current and attach to emails.
 
+use anyhow;
 use chrono::prelude::*;
 use handlebars::Handlebars;
 use lettre::smtp::authentication::Credentials;
 use lettre::{SmtpClient, Transport};
-use lettre_email::{mime, EmailBuilder};
+use lettre_email::EmailBuilder;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 
-pub fn activities(filter: Option<&str>) -> Vec<Value> {
-    let mut output = Vec::new();
-    let result = servicem8::get_job_activities(filter);
-    match result {
-        Err(err) => println!("{}", err),
-        Ok(response) => {
-            if response.is_array() {
-                let jobs = response.as_array().unwrap();
-                output.extend(jobs.clone().into_iter());
-            } else {
-                output.push(response);
-            }
-        }
-    };
-
-    output
-}
-
-pub fn jobs(filter: Option<&str>) -> Vec<Value> {
-    let mut output = Vec::new();
-    let result = servicem8::get_jobs(filter);
-    match result {
-        Err(err) => println!("{}", err),
-        Ok(response) => {
-            if response.is_array() {
-                // Cloning all the objects found and push all these structures into a vector to
-                // be returned.
-                let jobs = response.as_array().unwrap();
-                output.extend(jobs.clone().into_iter());
-            } else {
-                output.push(response);
-            }
-        }
-    };
-    output
-}
-
-pub fn opportunities() -> Vec<Value> {
-    let mut page = 0;
-    let per_page = 50u32;
-    let mut output = Vec::new();
-    loop {
-        page += 1;
-
-        let result = currentrms::get_opportunities(&page, &per_page);
-        match result {
-            Err(err) => {
-                println!("{}", err);
-                break;
-            }
-            Ok(response) => {
-                let opportunities_object = &response["opportunities"];
-                if !opportunities_object.is_array() {
-                    break;
-                }
-
-                // If there are no more opportunities then we're done.
-                let opportunities = opportunities_object.as_array().unwrap();
-                if opportunities.is_empty() {
-                    break;
-                }
-                // Cloning all the objects found and push all these structures into a vector to
-                // be returned.
-                output.extend(opportunities.clone().into_iter());
-            }
-        };
-    }
-    output
-}
-
-pub fn opportunities_documents(opportunity_id: u32) -> Vec<Value> {
-    let mut page = 0;
-    let per_page = 50u32;
-    let mut output = Vec::new();
-    loop {
-        page += 1;
-
-        let result = currentrms::get_opportunity_documents(page, per_page, opportunity_id);
-        match result {
-            Err(err) => {
-                println!("{}", err);
-                break;
-            }
-            Ok(response) => {
-                let array_object = &response["opportunity_documents"];
-                if !array_object.is_array() {
-                    break;
-                }
-                // If there are no more opportunities then we're done.
-                let items = array_object.as_array().unwrap();
-                if items.is_empty() {
-                    break;
-                }
-                // Cloning all the objects found and push all these structures into a vector to
-                // be returned.
-                output.extend(items.clone().into_iter());
-            }
-        };
-    }
-    output
-}
+use schedule_assistant::{extract_or_continue, json, servicem8};
 
 fn calculate_window(
     activity: &Value,
@@ -173,14 +73,10 @@ fn round_down(time: NaiveTime) -> NaiveTime {
     NaiveTime::from_hms(hour, minute, 0)
 }
 
-fn raw_name(client: &Value) -> String {
-    client["name"].as_str().unwrap().to_string()
-}
-
-fn split_name(client: &Value) -> (String, String) {
+fn split_name(client: &Value) -> Option<(String, String)> {
     let mut first_name = String::from("");
     let mut last_name = String::from("");
-    let mut name = raw_name(client);
+    let mut name = json::attribute_from_value(client, "name")?;
     if let Some(is_individual) = client["is_individual"].as_i64() {
         if is_individual == 1 {
             let c = name.find(',');
@@ -204,21 +100,10 @@ fn split_name(client: &Value) -> (String, String) {
             first_name = name;
         }
     }
-    (first_name, last_name)
+    Some((first_name, last_name))
 }
 
-fn full_name(client: &Value) -> String {
-    let mut name = raw_name(client);
-    if let Some(is_individual) = client["is_individual"].as_i64() {
-        if is_individual == 1 {
-            let (first, last) = split_name(client);
-            name = format!("{} {}", first, last)
-        }
-    }
-    name
-}
-
-fn main() {
+fn main() -> anyhow::Result<()> {
     dotenv::dotenv().expect("Failed to read .env file");
 
     // Calculate the date filter; Next week, starting from the following monday.
@@ -232,18 +117,21 @@ fn main() {
     let end_of_week = start_of_week + chrono::Duration::days(7);
 
     // Aggregate all the job id's of the activities that fall in the active window.
-    let activity_records: Vec<Value> = activities(Some("active eq '1'"));
-    let mut job_ids: Vec<&str> = activity_records
+    let activity_records: Vec<Value> = servicem8::job_activities()?
+        .into_iter()
+        .filter(servicem8::activity_is_active)
+        .collect::<Vec<Value>>();
+    let mut job_ids: Vec<String> = activity_records
         .iter()
         .filter(|&a| {
-            let start_date_str = a["start_date"].as_str().unwrap();
+            let start_date_str = json::attribute_from_value(a, "start_date").unwrap();
             let start_date = Utc
-                .datetime_from_str(start_date_str, "%Y-%m-%d %H:%M:%S")
+                .datetime_from_str(&start_date_str, "%Y-%m-%d %H:%M:%S")
                 .unwrap();
             let job_date = start_date.date();
             job_date >= start_of_week && job_date < end_of_week
         })
-        .map(|a| a["job_uuid"].as_str().unwrap())
+        .map(|a| json::attribute_from_value(a, "job_uuid").unwrap())
         .collect();
 
     // Remove duplicates from the jobs_id list.
@@ -251,10 +139,10 @@ fn main() {
     job_ids.dedup();
 
     // Grab the job objects
-    let jobs: Vec<Value> = jobs(None)
+    let jobs: Vec<Value> = servicem8::jobs()?
         .into_iter()
         .filter(|j| match j["uuid"].as_str() {
-            Some(uuid) => job_ids.iter().any(|&id| id == uuid),
+            Some(uuid) => job_ids.iter().any(|id| id == uuid),
             None => false,
         })
         .collect();
@@ -276,11 +164,73 @@ fn main() {
         .credentials(Credentials::new(smtp_username.into(), smtp_password.into()))
         .transport();
 
-    // Grab all of the opportunities.
-    let opportunities = opportunities();
+    // Grab lists of structures of interest.
+    //let opportunities = currentrms::opportunities(&currentrms_endpoint)?;
+    let contacts = servicem8::job_contacts()?;
+    let companies = servicem8::clients()?;
+
     // Iterate all the jobs that we've found, and send them schedule information.
     for j in &jobs {
-        let job_uuid = j["uuid"].as_str().unwrap();
+        let job_uuid = extract_or_continue!(j, "uuid");
+        let company_uuid = extract_or_continue!(j, "company_uuid");
+
+        // Get associated contacts to this job.
+        let job_contacts: Vec<&Value> = contacts
+            .iter()
+            .filter(|&a| a["job_uuid"].as_str().unwrap() == job_uuid)
+            .collect();
+
+        // Grab the billing contact.
+        let billing_contact = job_contacts
+            .iter()
+            .filter(|&a| a["type"].as_str().unwrap() == "BILLING")
+            .next();
+
+        // Client
+        let client = match companies
+            .iter()
+            .filter(|&company| company["uuid"].as_str().unwrap() == company_uuid)
+            .next()
+        {
+            Some(client) => client,
+            None => continue,
+        };
+
+        let raw_name = json::attribute_from_value(&client, "name").unwrap();
+        println!("Processing job for {}", raw_name);
+
+        // Grab the Clients contact details, we may need them later.
+        let client_details = match split_name(&client) {
+            Some(details) => details,
+            None => {
+                println!("Unable to extract client details for job {}", job_uuid);
+                continue;
+            }
+        };
+
+        // Get Job Contact information
+        let (first_name, _last_name, email) = match billing_contact {
+            Some(contact) => {
+                let first_name =
+                    json::attribute_from_value(&contact, "first").unwrap_or(client_details.0);
+                let last_name =
+                    json::attribute_from_value(&contact, "last").unwrap_or(client_details.1);
+                let email =
+                    json::attribute_from_value(&contact, "email").unwrap_or(String::from(""));
+                (first_name, last_name, email)
+            }
+            None => {
+                println!("Unable to find billing contact for job");
+                (client_details.0, client_details.1, String::from(""))
+            }
+        };
+
+        // If we dont have an email we cant really do anything here so skip to the next.
+        //@todo:  Do we try to send an email to the other contact?
+        if email == "" {
+            println!("Unable to find an email for job, continuing");
+            continue;
+        }
 
         // Find all of the job_activities associated with this job.
         let activities: Vec<&serde_json::Value> = activity_records
@@ -295,13 +245,6 @@ fn main() {
         // Determine the collection times.
         let (collection_date, collection_start, collection_end) =
             calculate_window(activities[1], chrono::Duration::hours(2));
-
-        // Get clients name
-        let client = servicem8::get_client(j["company_uuid"].as_str().unwrap()).unwrap();
-        let full_name = full_name(&client);
-        let client_name = split_name(&client).0;
-
-        println!("Processing job for {}", full_name);
 
         // Populate the template substitution data.
         let mut data = HashMap::new();
@@ -333,72 +276,83 @@ fn main() {
             "job_address",
             j["job_address"].as_str().unwrap().to_string(),
         );
-        data.insert("first_name", client_name.to_string());
+        data.insert("first_name", first_name.to_string());
 
         // Create email html content
         let output = handlebars.render_template(&template_source, &data).unwrap();
 
-        // Build the email
-        //println!("Building email");
-        let mut email_builder = EmailBuilder::new()
-            .from(("hello@twofoxes.co.nz", "Two Foxes"))
-            .to(("jared@twofoxes.co.nz", "Jared Watt")) //@todo: Need to grab email from clients record.
-            .subject("Delivery Confirmation")
-            .alternative(output, "this is the backup data if html is not supported?");
-
         // Find the opportunities for this job
         //@todo: Maybe filter on the client name, email, phone number?
         //       Then search for a job that is +/- 1 day of the found job
-        //println!("finding opportunity.");
-        let it = opportunities.iter().find(|&o| {
-            let member = &o["member"];
-            if !member.is_object() {
-                return false;
-            }
-            if !member["name"].is_string() {
-                return false;
-            }
-            let owner_name = member["name"].as_str().unwrap();
-            if owner_name == full_name {
-                return true;
-            }
-            //@todo: filter on email?
-            false
-        });
+        // println!("finding opportunity.");
+        // let full_name = format!("{} {}", first_name, last_name).trim().to_string();
+        // let it = opportunities.iter().find(|&o| {
+        //     let member = &o["member"];
+        //     if !member.is_object() {
+        //         return false;
+        //     }
+        //     if let Some(value) = member["name"].as_str() {
+        //         if value.trim() == full_name {
+        //             return true;
+        //         }
+        //     }
+        //     if let Some(value) = member["email"].as_str() {
+        //         if value.trim() == email {
+        //             return true;
+        //         }
+        //     }
 
-        match it {
-            Some(opportunity) => {
-                println!("Found Opportunity");
-                let opportuntity_id = opportunity["id"].as_i64().unwrap().try_into().unwrap();
+        //     false
+        // });
 
-                // Grab all the documents associated with this opportunity
-                let opportunity_documents = opportunities_documents(opportuntity_id);
-                // Find the pickinglist document
-                let it = opportunity_documents
-                    .iter()
-                    .find(|&d| d["document_id"] == 4);
-                let (data, filename) = match it {
-                    Some(d) => {
-                        // Download the pickinglist
-                        currentrms::get_opportunity_document_pdf(
-                            d["id"].as_i64().unwrap().try_into().unwrap(),
-                        )
-                        .unwrap()
-                    }
-                    None => {
-                        //@todo: Attempt to create the document...?
-                        println!("Unable to find document, attempting to prompt its creation.");
-                        currentrms::print_opportunity_document_pdf(opportuntity_id, 4).unwrap()
-                    }
-                };
+        // Build the email
+        //println!("Building email");
+        let /*mut*/ email_builder = EmailBuilder::new()
+            .from(("hello@twofoxes.co.nz", "Two Foxes"))
+            .to(email) //< @todo: add an override for the delivery email for testing?
+            .subject("Delivery Confirmation")
+            .alternative(output, "this is the backup data if html is not supported?");
 
-                // Attach to email.
-                email_builder = email_builder
-                    .attachment(&data, &filename, &mime::APPLICATION_PDF)
-                    .unwrap();
-            }
-            _ => println!("Unable to find opportunity"),
-        }
+        // match it {
+        //     Some(opportunity) => {
+        //         println!("Found Opportunity");
+        //         let opportuntity_id = opportunity["id"].as_i64().unwrap();
+
+        //         // Grab all the documents associated with this opportunity
+        //         let params = [format!("opportunity_id={}", opportuntity_id)];
+        //         let _opportunity_documents = currentrms::retrieve_paged(
+        //             &currentrms_endpoint,
+        //             currentrms::Object::OpportunityDocuments,
+        //             Some(&params),
+        //         )
+        //         .unwrap();
+
+        //         // Find the pickinglist document
+        //         let it = opportunity_documents
+        //             .iter()
+        //             .find(|&d| d["document_id"] == 4);
+        //         let (data, filename) = match it {
+        //             Some(d) => {
+        //                 // Download the pickinglist
+        //                 currentrms::get_opportunity_document_pdf(
+        //                     d["id"].as_i64().unwrap().try_into().unwrap(),
+        //                 )
+        //                 .unwrap()
+        //             }
+        //             None => {
+        //                 // Attempt to create the document...?
+        //                 println!("Unable to find document, attempting to prompt its creation.");
+        //                 currentrms::print_opportunity_document_pdf(opportuntity_id, 4).unwrap()
+        //             }
+        //         };
+
+        //         // Attach to email.
+        //         email_builder = email_builder
+        //             .attachment(&data, &filename, &mime::APPLICATION_PDF)
+        //             .unwrap();
+        //     }
+        //     _ => println!("Unable to find opportunity"),
+        // }
 
         // Send the email!
         println!("Sending email");
@@ -406,4 +360,6 @@ fn main() {
         let result = mailer.send(email.into());
         println!("{:?}", result);
     }
+
+    Ok(())
 }

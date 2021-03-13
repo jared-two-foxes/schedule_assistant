@@ -5,12 +5,15 @@
 // 2. Need to store the any timing windows required by the client somewhere, somehow.  This needs to be independant of servicem8 and
 //      if a window of an extended period the algorithm only needs to ensure that the found path falls somewhere in that time.
 
-use chrono::{DateTime, Duration, Local};
+use anyhow;
+use chrono::prelude::*;
+use chrono::Duration;
 use std::cmp;
+
+use schedule_assistant::{current_rms};
 
 mod comms;
 mod geolocate;
-mod retrieve;
 
 static HOME_ADDRESS: &str = "44b Henderson Valley Road, Henderson, Auckland";
 static HOME_PT: (f64, f64) = (174.62852, -36.886249);
@@ -110,14 +113,14 @@ fn calculate_route_distance(route: &[usize], edges: &[SearchNode], jobs: &[Job])
     r
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     dotenv::dotenv().expect("Failed to read .env file");
 
     let today = Local::today();
     let date = today + Duration::days(3);
 
     // Pull all currentrms::opportunities.
-    let opportunities = retrieve::opportunities();
+    let opportunities = current_rms::opportunities()?;
 
     // Create jobs for the given day.
     let mut jobs = Vec::new();
@@ -246,4 +249,6 @@ fn main() {
         route,
         minimum_distance.num_seconds() as f64 / 60.0
     );
+
+    Ok(())
 }
