@@ -7,7 +7,31 @@ mod retrieve;
 pub mod current_rms;
 pub mod servicem8;
 
-use chrono::{DateTime, Utc};
+use chrono::{Date, DateTime, Utc};
+use serde_json::Value;
+
+pub fn check_bookings(start: Date<Utc>, end: Date<Utc>) -> reqwest::Result<Vec<Value>> {
+    // Get Current-RMS opportunities.
+    let opportunities = current_rms::opportunities()?
+        .into_iter()
+        .filter(|opportunity| current_rms::opportunity_within_date_range(opportunity, &start, &end).unwrap())
+        .collect::<Vec<Value>>();
+
+    // Get ServiceM8 data that we're going to need.
+    let jobs = servicem8::jobs()?;
+    let clients = servicem8::clients()?;
+    let job_activities = servicem8::job_activities()?;
+    let job_contacts = servicem8::job_contacts()?;
+
+    // Check that all the opportunities have jobs registered in servicem8 with allocated
+    // Activities for delivery & collection.
+    let unscheduled = opportunities
+        .into_iter()
+        .filter(|opportunity| !current_rms::opportunity_has_job(&opportunity, &jobs, &clients, &job_contacts, &job_activities))
+        .collect::<Vec<Value>>();
+
+    Ok(unscheduled)
+}
 
 pub fn remove_expired_quotes(date: DateTime<Utc>) {
     // get all the opportunities
