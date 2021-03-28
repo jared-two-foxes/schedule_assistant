@@ -19,7 +19,8 @@ use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 
-use schedule_assistant::{extract_or_continue, json, servicem8};
+use schedule_assistant::authentication::AuthenticationCache;
+use schedule_assistant::{json, servicem8};
 
 fn calculate_window(
     activity: &Value,
@@ -73,39 +74,131 @@ fn round_down(time: NaiveTime) -> NaiveTime {
     NaiveTime::from_hms(hour, minute, 0)
 }
 
-fn split_name(client: &Value) -> Option<(String, String)> {
-    let mut first_name = String::from("");
-    let mut last_name = String::from("");
-    let mut name = json::attribute_from_value(client, "name")?;
-    if let Some(is_individual) = client["is_individual"].as_i64() {
-        if is_individual == 1 {
-            let c = name.find(',');
-            match c {
-                // client name is structured "lastname, firstname"
-                Some(c) => {
-                    last_name = name.drain(..c).collect();
-                    first_name = name[2..].to_string();
-                }
-                // client name either has no surname or is structured
-                // "firstname lastname"
-                None => {
-                    let c = name.find(' ').unwrap_or_else(|| name.len());
-                    first_name = name.drain(..c).collect();
-                    if !name.is_empty() {
-                        last_name = name;
-                    }
-                }
+fn process_client_name(client: &Value) -> Option<Vec<String>> {
+    let name = json::attribute_from_value(client, "name")?;
+    let is_individual = client["is_individual"].as_u64().unwrap_or(1); //< Default to an individual.
+    if is_individual == 1 {
+        Some(split_name(name))
+    } else {
+        Some(vec![name])
+    }
+}
+
+fn split_name(mut name: String) -> Vec<String> {
+    let c = name.find(',');
+    match c {
+        // name is structured "lastname, firstname"
+        Some(c) => {
+            let second = name.drain(..c).collect();
+            let first = name[2..].to_string();
+            vec![first, second]
+        }
+
+        // name either has no surname, ie company name, or is structured
+        // "firstname lastname"
+        None => {
+            let c = name.find(' ').unwrap_or_else(|| name.len());
+            let first = name.drain(..c).collect();
+            if !name.is_empty() {
+                let second = name;
+                vec![first, second]
+            } else {
+                vec![first]
             }
-        } else {
-            first_name = name;
         }
     }
-    Some((first_name, last_name))
+}
+
+fn find_by_attribute<'a>(list: &'a Vec<Value>, attribute: &str, value: &str) -> Option<&'a Value> {
+    list.iter()
+        .find(|&company| company[attribute].as_str().unwrap() == value)
+}
+
+fn best_email(job: &Value, contacts: &Vec<Value>) -> Option<String> {
+    let job_uuid = json::attribute_from_value(job, "uuid")?;
+
+    // Get associated contacts to this job.
+    let job_contacts: Vec<&Value> = contacts
+        .iter()
+        .filter(|&a| a["job_uuid"].as_str().unwrap() == job_uuid)
+        .collect();
+
+    // Grab the job contacts details.
+    //@todo:  What are the potential values of this? ['JOB','BILLING'].  Does it make sense to send an email to
+    //        the billing contact if we cant find the job contact?  Do we send it to everyone?  Extract all the
+    //        available emails?
+    let main_contact = job_contacts
+        .iter()
+        .find(|&a| a["type"].as_str().unwrap() == "JOB")?;
+
+    // Pull the email from the main contact.
+    json::attribute_from_value(&main_contact, "email")
+}
+
+fn populate_email_data_from_job(
+    job: &Value,
+    companies: &Vec<Value>,
+    activity_records: &Vec<Value>,
+) -> Option<HashMap<String, String>> {
+    let job_uuid = json::attribute_from_value(job, "uuid")?;
+    let company_uuid = json::attribute_from_value(job, "company_uuid")?;
+    let job_address = json::attribute_from_value(job, "job_address")?;
+
+    // Sanitize and build client name.
+    let client = find_by_attribute(&companies, "uuid", &company_uuid)?;
+    let client_name = process_client_name(client)?;
+
+    // Find all of the job_activities associated with this job.
+    let activities: Vec<&serde_json::Value> = activity_records
+        .iter()
+        .filter(|&a| a["job_uuid"].as_str().unwrap() == job_uuid)
+        .collect();
+
+    // Determine the delivery times.
+    let (delivery_date, delivery_start, delivery_end) =
+        calculate_window(activities[0], chrono::Duration::hours(2));
+
+    // Determine the collection times.
+    let (collection_date, collection_start, collection_end) =
+        calculate_window(activities[1], chrono::Duration::hours(2));
+    // Populate the template substitution data.
+    let mut data = HashMap::new();
+    data.insert(
+        "delivery_date".to_string(),
+        delivery_date.format("%a, %e %h").to_string(),
+    );
+    data.insert(
+        "delivery_start_time".to_string(),
+        delivery_start.format("%l:%M %P").to_string(),
+    );
+    data.insert(
+        "delivery_end_time".to_string(),
+        delivery_end.format("%l:%M %P").to_string(),
+    );
+    data.insert(
+        "collection_date".to_string(),
+        collection_date.format("%a, %e %h").to_string(),
+    );
+    data.insert(
+        "collection_start_time".to_string(),
+        collection_start.format("%l:%M %P").to_string(),
+    );
+    data.insert(
+        "collection_end_time".to_string(),
+        collection_end.format("%l:%M %P").to_string(),
+    );
+    data.insert("job_address".to_string(), job_address);
+    data.insert("first_name".to_string(), client_name[0].clone());
+
+    Some(data)
 }
 
 fn main() -> anyhow::Result<()> {
     dotenv::dotenv().expect("Failed to read .env file");
 
+//
+// Process commandline arguments
+//
     // Calculate the date filter; Next week, starting from the following monday.
     let mut current = Utc::now();
     let weekday = current.weekday();
@@ -116,18 +209,46 @@ fn main() -> anyhow::Result<()> {
     let start_of_week = current.date();
     let end_of_week = start_of_week + chrono::Duration::days(7);
 
-    // Aggregate all the job id's of the activities that fall in the active window.
-    let activity_records: Vec<Value> = servicem8::job_activities()?
+//
+// Retrieve all relevant data required to process.
+//
+    let auth_cache = AuthenticationCache::new();
+    let activity_records: Vec<Value> = servicem8::job_activities(&auth_cache)?
         .into_iter()
         .filter(servicem8::activity_is_active)
         .collect::<Vec<Value>>();
+    let jobs = servicem8::jobs(&auth_cache)?;
+    let contacts = servicem8::job_contacts(&auth_cache)?;
+    let companies = servicem8::clients(&auth_cache)?;
+    //let _opportunities = current_rms::opportunities(&auth_cache)?;
+
+//
+// Setup email template engine.
+//
+    let handlebars = Handlebars::new();
+    let mut source_template = File::open(&"./templates/template.hbs")?; //< If we cant find the template file, panic.
+    let mut template_source = String::new();
+    source_template.read_to_string(&mut template_source)?; //< Unable to parse template file, panic.
+
+//
+// Setup the email sender.
+//
+    let smtp_address = env::var("SMTP_ADDRESS").expect("SMTP_ADDRESS not found");
+    let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME not found");
+    let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD not found");
+    let mut mailer =
+        SmtpClient::new_simple(&smtp_address)? //< if this fails just bail since we cant do anything that we need to.`
+            .credentials(Credentials::new(smtp_username.into(), smtp_password.into()))
+            .transport();    
+
+//
+// Find all the jobs requiring emails to be sent.
+//
+    // Aggregate all the job id's of the activities that fall in the active window.
     let mut job_ids: Vec<String> = activity_records
         .iter()
         .filter(|&a| {
-            let start_date_str = json::attribute_from_value(a, "start_date").unwrap();
-            let start_date = Utc
-                .datetime_from_str(&start_date_str, "%Y-%m-%d %H:%M:%S")
-                .unwrap();
+            let start_date = json::date_from_value(a, "start_date", "%Y-%m-%d %H:%M:%S").unwrap();
             let job_date = start_date.date();
             job_date >= start_of_week && job_date < end_of_week
         })
@@ -138,8 +259,7 @@ fn main() -> anyhow::Result<()> {
     job_ids.sort_unstable();
     job_ids.dedup();
 
-    // Grab the job objects
-    let jobs: Vec<Value> = servicem8::jobs()?
+    let found_jobs: Vec<Value> = jobs
         .into_iter()
         .filter(|j| match j["uuid"].as_str() {
             Some(uuid) => job_ids.iter().any(|id| id == uuid),
@@ -147,218 +267,73 @@ fn main() -> anyhow::Result<()> {
         })
         .collect();
 
-    // Setup email templating.
-    let handlebars = Handlebars::new();
-    let mut source_template = File::open(&"./templates/template.hbs").unwrap();
-    let mut template_source = String::new();
-    source_template
-        .read_to_string(&mut template_source)
-        .unwrap();
-
-    // Setup the email sender.
-    let smtp_address = env::var("SMTP_ADDRESS").expect("SMTP_ADDRESS not found");
-    let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME not found");
-    let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD not found");
-    let mut mailer = SmtpClient::new_simple(&smtp_address)
-        .unwrap()
-        .credentials(Credentials::new(smtp_username.into(), smtp_password.into()))
-        .transport();
-
-    // Grab lists of structures of interest.
-    //let opportunities = currentrms::opportunities(&currentrms_endpoint)?;
-    let contacts = servicem8::job_contacts()?;
-    let companies = servicem8::clients()?;
-
+//
+// Send email to each job requiring it.
+//
     // Iterate all the jobs that we've found, and send them schedule information.
-    for j in &jobs {
-        let job_uuid = extract_or_continue!(j, "uuid");
-        let company_uuid = extract_or_continue!(j, "company_uuid");
-
-        // Get associated contacts to this job.
-        let job_contacts: Vec<&Value> = contacts
-            .iter()
-            .filter(|&a| a["job_uuid"].as_str().unwrap() == job_uuid)
-            .collect();
-
-        // Grab the billing contact.
-        let billing_contact = job_contacts
-            .iter()
-            .filter(|&a| a["type"].as_str().unwrap() == "BILLING")
-            .next();
-
-        // Client
-        let client = match companies
-            .iter()
-            .filter(|&company| company["uuid"].as_str().unwrap() == company_uuid)
-            .next()
-        {
-            Some(client) => client,
+    for job in &found_jobs {
+        // Find the best email-address for the email.
+        let email = match best_email(&job, &contacts) {
+            Some(data) => data,
             None => continue,
         };
 
-        let raw_name = json::attribute_from_value(&client, "name").unwrap();
-        println!("Processing job for {}", raw_name);
-
-        // Grab the Clients contact details, we may need them later.
-        let client_details = match split_name(&client) {
-            Some(details) => details,
-            None => {
-                println!("Unable to extract client details for job {}", job_uuid);
-                continue;
-            }
-        };
-
-        // Get Job Contact information
-        let (first_name, _last_name, email) = match billing_contact {
-            Some(contact) => {
-                let first_name =
-                    json::attribute_from_value(&contact, "first").unwrap_or(client_details.0);
-                let last_name =
-                    json::attribute_from_value(&contact, "last").unwrap_or(client_details.1);
-                let email =
-                    json::attribute_from_value(&contact, "email").unwrap_or(String::from(""));
-                (first_name, last_name, email)
-            }
-            None => {
-                println!("Unable to find billing contact for job");
-                (client_details.0, client_details.1, String::from(""))
-            }
-        };
-
-        // If we dont have an email we cant really do anything here so skip to the next.
-        //@todo:  Do we try to send an email to the other contact?
-        if email == "" {
-            println!("Unable to find an email for job, continuing");
-            continue;
-        }
-
-        // Find all of the job_activities associated with this job.
-        let activities: Vec<&serde_json::Value> = activity_records
-            .iter()
-            .filter(|&a| a["job_uuid"].as_str().unwrap() == job_uuid)
-            .collect();
-
-        // Determine the delivery times.
-        let (delivery_date, delivery_start, delivery_end) =
-            calculate_window(activities[0], chrono::Duration::hours(2));
-
-        // Determine the collection times.
-        let (collection_date, collection_start, collection_end) =
-            calculate_window(activities[1], chrono::Duration::hours(2));
-
         // Populate the template substitution data.
-        let mut data = HashMap::new();
-        data.insert(
-            "delivery_date",
-            delivery_date.format("%a, %e %h").to_string(),
-        );
-        data.insert(
-            "delivery_start_time",
-            delivery_start.format("%l:%M %P").to_string(),
-        );
-        data.insert(
-            "delivery_end_time",
-            delivery_end.format("%l:%M %P").to_string(),
-        );
-        data.insert(
-            "collection_date",
-            collection_date.format("%a, %e %h").to_string(),
-        );
-        data.insert(
-            "collection_start_time",
-            collection_start.format("%l:%M %P").to_string(),
-        );
-        data.insert(
-            "collection_end_time",
-            collection_end.format("%l:%M %P").to_string(),
-        );
-        data.insert(
-            "job_address",
-            j["job_address"].as_str().unwrap().to_string(),
-        );
-        data.insert("first_name", first_name.to_string());
+        let data = match populate_email_data_from_job(&job, &companies, &activity_records) {
+            Some(data) => data,
+            None => continue,
+        };
 
         // Create email html content
-        let output = handlebars.render_template(&template_source, &data).unwrap();
-
-        // Find the opportunities for this job
-        //@todo: Maybe filter on the client name, email, phone number?
-        //       Then search for a job that is +/- 1 day of the found job
-        // println!("finding opportunity.");
-        // let full_name = format!("{} {}", first_name, last_name).trim().to_string();
-        // let it = opportunities.iter().find(|&o| {
-        //     let member = &o["member"];
-        //     if !member.is_object() {
-        //         return false;
-        //     }
-        //     if let Some(value) = member["name"].as_str() {
-        //         if value.trim() == full_name {
-        //             return true;
-        //         }
-        //     }
-        //     if let Some(value) = member["email"].as_str() {
-        //         if value.trim() == email {
-        //             return true;
-        //         }
-        //     }
-
-        //     false
-        // });
+        let output = match handlebars.render_template(&template_source, &data) {
+            Ok(data) => data, 
+            Err(e) => {
+                println!("Unable to render email template: {}", e);
+                continue
+            }
+        };
 
         // Build the email
-        //println!("Building email");
-        let /*mut*/ email_builder = EmailBuilder::new()
+        println!("Building email");
+        let email_builder = EmailBuilder::new()
             .from(("hello@twofoxes.co.nz", "Two Foxes"))
             .to(email) //< @todo: add an override for the delivery email for testing?
             .subject("Delivery Confirmation")
-            .alternative(output, "this is the backup data if html is not supported?");
+            .html(output); //< Not going to worry about non HTML email clients at this stage.  What is this the 90's?
 
-        // match it {
-        //     Some(opportunity) => {
-        //         println!("Found Opportunity");
-        //         let opportuntity_id = opportunity["id"].as_i64().unwrap();
+        // // Find the opportunities for this job
+        // // @todo: Maybe filter on the client name, email, phone number?
+        // //       Then search for a job that is +/- 1 day of the foud job
+        // println!("finding opportunity.");
+        // if let Some(opportunity) = schedule_assistant::find_opportunity_for_job(
+        //     &opportunities,
+        //     client,
+        //     &activities,
+        //     &job_contacts,
+        // ) {
+        //     let opportunity_id = opportunity["id"].as_u64().unwrap();
+        //     let (picking_list, filename) =
+        //         current_rms::print_document_pdf(&auth_cache, opportunity_id, 4)?;
+        //     let mut file = File::create(filename)?;
+        //     file.write_all(&picking_list)?;
 
-        //         // Grab all the documents associated with this opportunity
-        //         let params = [format!("opportunity_id={}", opportuntity_id)];
-        //         let _opportunity_documents = currentrms::retrieve_paged(
-        //             &currentrms_endpoint,
-        //             currentrms::Object::OpportunityDocuments,
-        //             Some(&params),
-        //         )
+        //     // Attach to email.
+        //     email_builder = email_builder
+        //         .attachment(&data, &filename, &mime::APPLICATION_PDF)
         //         .unwrap();
-
-        //         // Find the pickinglist document
-        //         let it = opportunity_documents
-        //             .iter()
-        //             .find(|&d| d["document_id"] == 4);
-        //         let (data, filename) = match it {
-        //             Some(d) => {
-        //                 // Download the pickinglist
-        //                 currentrms::get_opportunity_document_pdf(
-        //                     d["id"].as_i64().unwrap().try_into().unwrap(),
-        //                 )
-        //                 .unwrap()
-        //             }
-        //             None => {
-        //                 // Attempt to create the document...?
-        //                 println!("Unable to find document, attempting to prompt its creation.");
-        //                 currentrms::print_opportunity_document_pdf(opportuntity_id, 4).unwrap()
-        //             }
-        //         };
-
-        //         // Attach to email.
-        //         email_builder = email_builder
-        //             .attachment(&data, &filename, &mime::APPLICATION_PDF)
-        //             .unwrap();
-        //     }
-        //     _ => println!("Unable to find opportunity"),
-        // }
+        // };
 
         // Send the email!
         println!("Sending email");
-        let email = email_builder.build().unwrap();
-        let result = mailer.send(email.into());
-        println!("{:?}", result);
+        match email_builder.build() {
+            Ok(email) => {
+                let result = mailer.send(email.into());
+                println!("{:?}", result);
+            }
+            Err(e) => {
+                println!("Error sending email: {}", e);
+            }
+        };
     }
 
     Ok(())

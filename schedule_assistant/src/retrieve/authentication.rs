@@ -29,3 +29,16 @@ impl Authentication for SubdomainAuthentication {
             .header("X-AUTH-TOKEN", self.password.clone())        
     }
 }
+
+pub struct BearerAuthentication {
+    pub subdomain: String,
+    pub token: String,
+}
+
+impl Authentication for BearerAuthentication {
+    fn apply(&self, request_builder: RequestBuilder) -> RequestBuilder {
+        request_builder
+            .header("X-SUBDOMAIN", &self.subdomain)
+            .bearer_auth(&self.token)
+    }
+}

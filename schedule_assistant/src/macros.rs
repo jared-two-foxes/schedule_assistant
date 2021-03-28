@@ -2,14 +2,11 @@
 pub use crate::json;
 
 #[macro_export]
-macro_rules! extract_or_continue {
-    ($value:tt, $attribute:tt) => {
-        match json::attribute_from_value($value, $attribute) {
+macro_rules! match_or_continue {
+    ($expression:expr) => {
+        match $expression {
             Some(value) => value,
-            None => {
-                println!("Unable to find {}, continuing", $attribute);
-                continue;
-            }
+            None => continue
         };
     };
 }
@@ -23,21 +20,3 @@ macro_rules! guard {
         }
     };
 }
-
-// macro_rules! opt_guard {
-//     ($e:expr) => {
-//         match $e {
-//             Some(value) => value,
-//             None => return Some(false),
-//         }
-//     };
-// }
-
-// macro_rules! err_guard {
-//     ($e:expr) => {
-//         match $e {
-//             Some(value) => value,
-//             None => return Ok(false),
-//         }
-//     };
-// }

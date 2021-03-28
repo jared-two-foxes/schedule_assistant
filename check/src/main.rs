@@ -30,6 +30,7 @@ fn calculate_date_range(date: DateTime<Utc>) -> (Date<Utc>, Date<Utc>) {
 fn main() -> anyhow::Result<()> {
     dotenv::dotenv().expect("Failed to read .env file");
 
+    let auth_cache = schedule_assistant::authentication::AuthenticationCache::new();
     let args: Vec<String> = env::args().collect();
     let start = if args.len() > 1 { 
         Utc.datetime_from_str(&args[1], "%Y-%m-%d %H:%M:%S")? //"2021-03-22 00:00:00"
@@ -40,10 +41,10 @@ fn main() -> anyhow::Result<()> {
 
     
     let (start_of_week, end_of_week) = calculate_date_range(start); //< Calculate the date filter; Next week, starting from the following monday.
-    let unscheduled = schedule_assistant::check_bookings(start_of_week, end_of_week)?;
+    let unscheduled = schedule_assistant::check_bookings(&auth_cache, start_of_week, end_of_week)?;
 
     println!(
-        "There are {} unscheduled jobs for the week {} to {}",
+        "There are {} unscheduled opportunities for the week {} to {}",
         unscheduled.len(),
         start_of_week,
         end_of_week

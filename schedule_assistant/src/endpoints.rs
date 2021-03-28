@@ -5,15 +5,20 @@
 pub mod current_rms {
     use crate::retrieve::endpoint::{BasicEndpoint, Endpoint, PagedEndpoint};
     
-    static BASE_URL: &str = "https://api.current-rms.com/api/v1/";
+    static BASE_URL: &str = "https://api.current-rms.com/api/v1";
 
     pub fn opportunities() -> PagedEndpoint {
-        let base_url = format!("{}{}", BASE_URL, "opportunities");
+        let base_url = format!("{}/{}", BASE_URL, "opportunities");
         PagedEndpoint { base_url, page: 0 }
     }
 
     pub fn mark_as_dead(id: u64) -> impl Endpoint {
-        let base_url = format!("{}{}/{}/mark_as_dead", BASE_URL, "opportunities", id);
+        let base_url = format!("{}/opportunities/{}/mark_as_dead", BASE_URL, id);
+        BasicEndpoint { base_url }
+    }
+
+    pub fn opportunity_print_document_pdf(subdomain: &str, opportunity_id: u64, document_id: u64) -> impl Endpoint {
+        let base_url = format!("https://{}.current-rms.com/opportunities/{}/print_document.pdf?document_id={}", subdomain, opportunity_id, document_id);
         BasicEndpoint { base_url }
     }
 }

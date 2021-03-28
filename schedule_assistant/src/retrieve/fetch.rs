@@ -7,7 +7,7 @@ use serde_json::Value;
 use super::authentication::Authentication;
 use super::endpoint::Endpoint;
 
-fn fetch<T: Endpoint, U: Authentication>(
+pub fn fetch<T: Endpoint, U: Authentication>(
     endpoint: &T,
     authentication: &U,
 ) -> reqwest::Result<Response> {

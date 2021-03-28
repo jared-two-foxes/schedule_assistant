@@ -118,9 +118,10 @@ fn main() -> anyhow::Result<()> {
 
     let today = Local::today();
     let date = today + Duration::days(3);
+    let auth_cache = schedule_assistant::authentication::AuthenticationCache::new();
 
     // Pull all currentrms::opportunities.
-    let opportunities = current_rms::opportunities()?;
+    let opportunities = current_rms::opportunities(&auth_cache)?;
 
     // Create jobs for the given day.
     let mut jobs = Vec::new();
