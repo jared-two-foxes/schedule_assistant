@@ -11,3 +11,6 @@ serde_json = "1.0.57"
 url = "2.1.1"
 uuid = { version = "0.8.1", features = ["serde"] }
 oauth2 = "3.0.0"
+rusqlite = "0.24.2"
+serde_rusqlite = "0.26.0"
+serde = { version = "1.0.125", features = ["derive"] }

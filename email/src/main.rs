@@ -1,3 +1,15 @@
+// name: email
+// type: command line application
+// desc: sends an email to the specified contact of each upcoming
+//       servicem8 job within a specified window which outlines the
+//       expected timelines for delivery and collection.
+
+// Tasks
+// [] parse the commandline arguments to get the query window
+// [] pull the servicem8 jobs which fit within winodw
+// [] iterate each of the jobs and compose the email to be sent
+// [] send the emails
+
 // Tasklist/Options?
 // Pull the clients email out of servicem8
 // if there is no email address dont bother attempting to send.
@@ -12,20 +24,21 @@ use chrono::prelude::*;
 use handlebars::Handlebars;
 use lettre::smtp::authentication::Credentials;
 use lettre::{SmtpClient, Transport};
-use lettre_email::EmailBuilder;
+use lettre_email::{Email, EmailBuilder};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::env;
 use std::fs::File;
 use std::io::prelude::*;
+use std::{cmp, env};
 
 use schedule_assistant::authentication::AuthenticationCache;
-use schedule_assistant::{json, servicem8};
+use schedule_assistant::{current_rms, json, servicem8};
 
 fn calculate_window(
     activity: &Value,
-    max_duration: chrono::Duration,
-) -> (NaiveDate, NaiveTime, NaiveTime) {
+    min_duration: chrono::Duration,
+) -> (NaiveDateTime, chrono::Duration) {
     // Calculate the start time
     let start = Utc
         .datetime_from_str(
@@ -33,22 +46,12 @@ fn calculate_window(
             "%Y-%m-%d %H:%M:%S",
         )
         .unwrap();
-    let start_time = start.time();
-
     let end = Utc
         .datetime_from_str(activity["end_date"].as_str().unwrap(), "%Y-%m-%d %H:%M:%S")
         .unwrap();
-    let max_end_time = start_time + max_duration;
-    let mut end_time = end.time();
-    if end_time < max_end_time {
-        end_time = max_end_time;
-    }
+    let duration = round_up(end.time()) - round_down(start.time());
 
-    (
-        start.naive_local().date(),
-        round_down(start_time),
-        round_up(end_time),
-    )
+    (start.naive_local(), cmp::max(duration, min_duration))
 }
 
 fn round_up(time: NaiveTime) -> NaiveTime {
@@ -114,21 +117,14 @@ fn find_by_attribute<'a>(list: &'a Vec<Value>, attribute: &str, value: &str) -> 
         .find(|&company| company[attribute].as_str().unwrap() == value)
 }
 
-fn best_email(job: &Value, contacts: &Vec<Value>) -> Option<String> {
-    let job_uuid = json::attribute_from_value(job, "uuid")?;
-
-    // Get associated contacts to this job.
-    let job_contacts: Vec<&Value> = contacts
-        .iter()
-        .filter(|&a| a["job_uuid"].as_str().unwrap() == job_uuid)
-        .collect();
-
+fn best_email(job: &Job, contacts: &Vec<Value>) -> Option<String> {
     // Grab the job contacts details.
     //@todo:  What are the potential values of this? ['JOB','BILLING'].  Does it make sense to send an email to
     //        the billing contact if we cant find the job contact?  Do we send it to everyone?  Extract all the
     //        available emails?
-    let main_contact = job_contacts
+    let main_contact = contacts
         .iter()
+        .filter(|&a| a["job_uuid"].as_str().unwrap() == job.uuid)
         .find(|&a| a["type"].as_str().unwrap() == "JOB")?;
 
     // Pull the email from the main contact.
@@ -136,70 +132,37 @@ fn best_email(job: &Value, contacts: &Vec<Value>) -> Option<String> {
 }
 
 fn populate_email_data_from_job(
-    job: &Value,
+    job: &Job,
     companies: &Vec<Value>,
     activity_records: &Vec<Value>,
 ) -> Option<HashMap<String, String>> {
-    let job_uuid = json::attribute_from_value(job, "uuid")?;
-    let company_uuid = json::attribute_from_value(job, "company_uuid")?;
-    let job_address = json::attribute_from_value(job, "job_address")?;
-
     // Sanitize and build client name.
-    let client = find_by_attribute(&companies, "uuid", &company_uuid)?;
+    let client = find_by_attribute(&companies, "uuid", &job.company_uuid)?;
     let client_name = process_client_name(client)?;
 
     // Find all of the job_activities associated with this job.
-    let activities: Vec<&serde_json::Value> = activity_records
+    let _activities: Vec<(NaiveDateTime, chrono::Duration)> = activity_records
         .iter()
-        .filter(|&a| a["job_uuid"].as_str().unwrap() == job_uuid)
+        .filter(|&a| a["job_uuid"].as_str().unwrap() == job.uuid)
+        .map(|a| calculate_window(&a, chrono::Duration::hours(2)))
         .collect();
 
-    // Determine the delivery times.
-    let (delivery_date, delivery_start, delivery_end) =
-        calculate_window(activities[0], chrono::Duration::hours(2));
-
-    // Determine the collection times.
-    let (collection_date, collection_start, collection_end) =
-        calculate_window(activities[1], chrono::Duration::hours(2));
     // Populate the template substitution data.
     let mut data = HashMap::new();
-    data.insert(
-        "delivery_date".to_string(),
-        delivery_date.format("%a, %e %h").to_string(),
-    );
-    data.insert(
-        "delivery_start_time".to_string(),
-        delivery_start.format("%l:%M %P").to_string(),
-    );
-    data.insert(
-        "delivery_end_time".to_string(),
-        delivery_end.format("%l:%M %P").to_string(),
-    );
-    data.insert(
-        "collection_date".to_string(),
-        collection_date.format("%a, %e %h").to_string(),
-    );
-    data.insert(
-        "collection_start_time".to_string(),
-        collection_start.format("%l:%M %P").to_string(),
-    );
-    data.insert(
-        "collection_end_time".to_string(),
-        collection_end.format("%l:%M %P").to_string(),
-    );
-    data.insert("job_address".to_string(), job_address);
+    //@todo: Insert the activities as strings?
+    // data.insert(
+    //     "activites".to_string(),
+    //     activities
+    // );
+    data.insert("job_address".to_string(), job.address.clone());
     data.insert("first_name".to_string(), client_name[0].clone());
 
     Some(data)
 }
 
-fn main() -> anyhow::Result<()> {
-    dotenv::dotenv().expect("Failed to read .env file");
-
-//
-// Process commandline arguments
-//
-    // Calculate the date filter; Next week, starting from the following monday.
+// Calculate the date window bounds;
+// filter: Next week, starting from the following monday.
+fn parse_command_line() -> (Date<Utc>, Date<Utc>) {
     let mut current = Utc::now();
     let weekday = current.weekday();
     let num_days = weekday.num_days_from_monday();
@@ -208,42 +171,27 @@ fn main() -> anyhow::Result<()> {
     }
     let start_of_week = current.date();
     let end_of_week = start_of_week + chrono::Duration::days(7);
+    (start_of_week, end_of_week)
+}
 
-//
-// Retrieve all relevant data required to process.
-//
-    let auth_cache = AuthenticationCache::new();
+#[derive(Deserialize)]
+struct Job {
+    uuid: String,
+    company_uuid: String,
+    address: String,
+}
+
+fn query_relevant_jobs(
+    auth_cache: &AuthenticationCache,
+    start_of_week: Date<Utc>,
+    end_of_week: Date<Utc>,
+) -> reqwest::Result<Vec<Job>> {
     let activity_records: Vec<Value> = servicem8::job_activities(&auth_cache)?
         .into_iter()
         .filter(servicem8::activity_is_active)
         .collect::<Vec<Value>>();
     let jobs = servicem8::jobs(&auth_cache)?;
-    let contacts = servicem8::job_contacts(&auth_cache)?;
-    let companies = servicem8::clients(&auth_cache)?;
-    //let _opportunities = current_rms::opportunities(&auth_cache)?;
 
-//
-// Setup email template engine.
-//
-    let handlebars = Handlebars::new();
-    let mut source_template = File::open(&"./templates/template.hbs")?; //< If we cant find the template file, panic.
-    let mut template_source = String::new();
-    source_template.read_to_string(&mut template_source)?; //< Unable to parse template file, panic.
-
-//
-// Setup the email sender.
-//
-    let smtp_address = env::var("SMTP_ADDRESS").expect("SMTP_ADDRESS not found");
-    let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME not found");
-    let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD not found");
-    let mut mailer =
-        SmtpClient::new_simple(&smtp_address)? //< if this fails just bail since we cant do anything that we need to.`
-            .credentials(Credentials::new(smtp_username.into(), smtp_password.into()))
-            .transport();    
-
-//
-// Find all the jobs requiring emails to be sent.
-//
     // Aggregate all the job id's of the activities that fall in the active window.
     let mut job_ids: Vec<String> = activity_records
         .iter()
@@ -259,37 +207,52 @@ fn main() -> anyhow::Result<()> {
     job_ids.sort_unstable();
     job_ids.dedup();
 
-    let found_jobs: Vec<Value> = jobs
+    let found_jobs: Vec<Job> = jobs
         .into_iter()
         .filter(|j| match j["uuid"].as_str() {
             Some(uuid) => job_ids.iter().any(|id| id == uuid),
             None => false,
         })
+        .map(|value| serde_json::from_value(value).unwrap())
         .collect();
 
-//
-// Send email to each job requiring it.
-//
-    // Iterate all the jobs that we've found, and send them schedule information.
-    for job in &found_jobs {
+    Ok(found_jobs)
+}
+
+fn populate_emails(
+    auth_cache: &AuthenticationCache,
+    jobs: &Vec<Job>,
+) -> anyhow::Result<Vec<Email>> {
+    let contacts = servicem8::job_contacts(&auth_cache)?;
+    let companies = servicem8::clients(&auth_cache)?;
+    let activity_records: Vec<Value> = servicem8::job_activities(&auth_cache)?; //< querying for these the second time, seems bad!
+    let _opportunities = current_rms::opportunities(&auth_cache)?;
+    // Setup email template engine.
+    let handlebars = Handlebars::new();
+    let mut source_template = File::open(&"./templates/template.hbs")?; //< If we cant find the template file, panic.
+    let mut template_source = String::new();
+    source_template.read_to_string(&mut template_source)?; //< Unable to parse template file, panic.
+
+    let mut vec = Vec::new();
+    for job in jobs {
         // Find the best email-address for the email.
-        let email = match best_email(&job, &contacts) {
+        let email = match best_email(job, &contacts) {
             Some(data) => data,
             None => continue,
         };
 
         // Populate the template substitution data.
-        let data = match populate_email_data_from_job(&job, &companies, &activity_records) {
+        let data = match populate_email_data_from_job(job, &companies, &activity_records) {
             Some(data) => data,
             None => continue,
         };
 
         // Create email html content
         let output = match handlebars.render_template(&template_source, &data) {
-            Ok(data) => data, 
+            Ok(data) => data,
             Err(e) => {
                 println!("Unable to render email template: {}", e);
-                continue
+                continue;
             }
         };
 
@@ -323,18 +286,36 @@ fn main() -> anyhow::Result<()> {
         //         .unwrap();
         // };
 
-        // Send the email!
-        println!("Sending email");
-        match email_builder.build() {
-            Ok(email) => {
-                let result = mailer.send(email.into());
-                println!("{:?}", result);
-            }
-            Err(e) => {
-                println!("Error sending email: {}", e);
-            }
-        };
+        let email = email_builder.build()?;
+        vec.push(email);
+    }
+
+    Ok(vec)
+}
+
+fn send_emails(emails: Vec<Email>) -> anyhow::Result<()> {
+    // Setup the email sender.
+    let smtp_address = env::var("SMTP_ADDRESS").expect("SMTP_ADDRESS not found");
+    let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME not found");
+    let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD not found");
+    let mut mailer =
+        SmtpClient::new_simple(&smtp_address)? //< if this fails just bail since we cant do anything that we need to.`
+            .credentials(Credentials::new(smtp_username.into(), smtp_password.into()))
+            .transport();
+
+    for email in emails {
+        mailer.send(email.into())?;
     }
 
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    dotenv::dotenv().expect("Failed to read .env file");
+
+    let (start_of_week, end_of_week) = parse_command_line();
+    let auth_cache = AuthenticationCache::new();
+    let jobs = query_relevant_jobs(&auth_cache, start_of_week, end_of_week)?;
+    let emails = populate_emails(&auth_cache, &jobs)?;
+    send_emails(emails)
 }

@@ -27,8 +27,8 @@ fn current_rms() -> reqwest::Result<BearerAuthentication> {
     use oauth2::basic::BasicClient;
     use oauth2::reqwest::http_client;
     use oauth2::{
-        AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-        RedirectUrl, TokenResponse, TokenUrl,
+        AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl, TokenResponse,
+        TokenUrl,
     };
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;

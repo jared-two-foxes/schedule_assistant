@@ -1,4 +1,5 @@
 pub mod authentication;
+pub mod database;
 mod endpoints;
 pub mod json;
 mod macros;
@@ -11,8 +12,6 @@ use authentication::AuthenticationCache;
 use chrono::{Date, DateTime, Utc};
 use serde_json::Value;
 
-
-
 fn date_bound_by(date: &Date<Utc>, start: &Date<Utc>, end: &Date<Utc>) -> bool {
     date > start && date < end
 }
@@ -21,7 +20,6 @@ type Period<T> = (Date<T>, Date<T>);
 fn period_bound_by(period: &Period<Utc>, start: &Date<Utc>, end: &Date<Utc>) -> bool {
     date_bound_by(&period.0, start, end) && date_bound_by(&period.1, start, end)
 }
-
 
 fn member_matches_client(member: &Value, client: &Value) -> bool {
     let member_name = guard!(json::attribute_from_value(&member, "name"));
@@ -110,16 +108,18 @@ fn opportunity_matches_job(
     }
 
     let member_matches = member_matches_client(member, &client);
-    let contact_matches = job_contacts.iter().any(|&contact| member_matches_contact(member, &contact));
+    let contact_matches = job_contacts
+        .iter()
+        .any(|&contact| member_matches_contact(member, &contact));
     if member_matches || contact_matches {
-
         let starts_at =
             json::date_from_value(opportunity, "starts_at", "%Y-%m-%dT%H:%M:%S%.3f%Z").unwrap();
-        let ends_at = json::date_from_value(opportunity, "ends_at", "%Y-%m-%dT%H:%M:%S%.3f%Z").unwrap();
+        let ends_at =
+            json::date_from_value(opportunity, "ends_at", "%Y-%m-%dT%H:%M:%S%.3f%Z").unwrap();
         for activity in job_activities {
             if let Some(value) =
                 activity_within_date_range(&activity, &starts_at.date(), &ends_at.date())
-            { 
+            {
                 if value {
                     return Ok(true);
                 }
@@ -182,7 +182,24 @@ pub fn find_opportunity_for_job<'a>(
     })
 }
 
-pub fn check_bookings(auth_cache: &AuthenticationCache, start: Date<Utc>, end: Date<Utc>) -> reqwest::Result<Vec<Value>> {
+pub fn check_bookings(
+    auth_cache: &AuthenticationCache,
+    start: Date<Utc>,
+    end: Date<Utc>,
+) -> reqwest::Result<Vec<Value>> {
+    // Panic's if we cant open the database.
+    let conn = database::connection().unwrap(); 
+
+    // PANIC:  Will panic if table is already created.
+    database::create_table(&conn).unwrap();
+    // PANIC:  Will panic if the person already exists in the table.
+    database::insert(&conn).unwrap();
+    // PANIC: If we are unable to query the database.
+    let people = database::query(&conn).unwrap();
+    for person in people {
+        println!("Found person {:?}", person);
+    }
+
     // Get Current-RMS opportunities.
     let opportunities = current_rms::opportunities(auth_cache)?
         .into_iter()

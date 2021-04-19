@@ -42,18 +42,18 @@ pub fn get_list<T: Endpoint, U: Authentication>(
     Ok(output)
 }
 
-pub fn post<T: Endpoint, U: Authentication>(
-    endpoint: &T,
-    authentication: &U,
-) -> reqwest::Result<Value> {
-    let client = Client::new();
-    let url = endpoint.url();
-    println!("url: {}", url);
-    let mut request_builder = client.post(&url);
-    request_builder = authentication.apply(request_builder);
-    let response = request_builder.send()?;
-    response.json()
-}
+// pub fn post<T: Endpoint, U: Authentication>(
+//     endpoint: &T,
+//     authentication: &U,
+// ) -> reqwest::Result<Value> {
+//     let client = Client::new();
+//     let url = endpoint.url();
+//     println!("url: {}", url);
+//     let mut request_builder = client.post(&url);
+//     request_builder = authentication.apply(request_builder);
+//     let response = request_builder.send()?;
+//     response.json()
+// }
 
 //document_id: u32
 //let url = format!("{}/opportunity_documents/{}.pdf", BASE_URL, document_id);

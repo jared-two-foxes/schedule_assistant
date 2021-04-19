@@ -1,4 +1,4 @@
 [workspace]
 members = [
-    "check", "distance", "schedule", "email", "schedule_assistant", "assistant", "remove_quotes"
+    "check", "distance", "schedule", "email", "schedule_assistant", "remove_quotes"
 ]
