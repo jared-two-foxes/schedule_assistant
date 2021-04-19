@@ -21,6 +21,7 @@
 
 use anyhow;
 use chrono::prelude::*;
+use chrono::{Duration, DurationRound};
 use handlebars::Handlebars;
 use lettre::smtp::authentication::Credentials;
 use lettre::{SmtpClient, Transport};
@@ -35,10 +36,7 @@ use std::{cmp, env};
 use schedule_assistant::authentication::AuthenticationCache;
 use schedule_assistant::{current_rms, json, servicem8};
 
-fn calculate_window(
-    activity: &Value,
-    min_duration: chrono::Duration,
-) -> (NaiveDateTime, chrono::Duration) {
+fn calculate_window(activity: &Value, min_duration: Duration) -> (NaiveDateTime, chrono::Duration) {
     // Calculate the start time
     let start = Utc
         .datetime_from_str(
@@ -49,32 +47,10 @@ fn calculate_window(
     let end = Utc
         .datetime_from_str(activity["end_date"].as_str().unwrap(), "%Y-%m-%d %H:%M:%S")
         .unwrap();
-    let duration = round_up(end.time()) - round_down(start.time());
 
+    let duration = end.duration_round(Duration::minutes(30)).unwrap().time()
+        - start.duration_trunc(Duration::minutes(30)).unwrap().time();
     (start.naive_local(), cmp::max(duration, min_duration))
-}
-
-fn round_up(time: NaiveTime) -> NaiveTime {
-    let mut hour = time.hour();
-    let mut minute = time.minute();
-    if minute > 30 {
-        minute = 0;
-        hour += 1;
-    } else {
-        minute = 30;
-    }
-    NaiveTime::from_hms(hour, minute, 0)
-}
-
-fn round_down(time: NaiveTime) -> NaiveTime {
-    let hour = time.hour();
-    let mut minute = time.minute();
-    if minute >= 30 {
-        minute = 30;
-    } else {
-        minute = 0;
-    }
-    NaiveTime::from_hms(hour, minute, 0)
 }
 
 fn process_client_name(client: &Value) -> Option<Vec<String>> {
@@ -119,9 +95,6 @@ fn find_by_attribute<'a>(list: &'a Vec<Value>, attribute: &str, value: &str) -> 
 
 fn best_email(job: &Job, contacts: &Vec<Value>) -> Option<String> {
     // Grab the job contacts details.
-    //@todo:  What are the potential values of this? ['JOB','BILLING'].  Does it make sense to send an email to
-    //        the billing contact if we cant find the job contact?  Do we send it to everyone?  Extract all the
-    //        available emails?
     let main_contact = contacts
         .iter()
         .filter(|&a| a["job_uuid"].as_str().unwrap() == job.uuid)
