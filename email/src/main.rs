@@ -5,19 +5,15 @@
 //       expected timelines for delivery and collection.
 
 // Tasks
-// [] parse the commandline arguments to get the query window
-// [] pull the servicem8 jobs which fit within winodw
-// [] iterate each of the jobs and compose the email to be sent
-// [] send the emails
+// [x] parse the commandline arguments to get the query window
+// [x] pull the servicem8 jobs which fit within winodw
+// [] compose the emails to be sent
+// [] attach the picking lists
+// [x] send the emails
 
-// Tasklist/Options?
-// Pull the clients email out of servicem8
-// if there is no email address dont bother attempting to send.
-// add stmp server & login to the env file.
 
-// Command Line Arguments
-// Option to send all emails to jared@twofoxes.co.nz to check first
-// download pickinglists from current and attach to emails.
+//@todo: Update the handlebars rendering to use the changes added by the json data structure change.
+//@todo: Filter the opportunities by active when requesting.  No point getting old opportunities
 
 use anyhow;
 use chrono::prelude::*;
@@ -27,8 +23,7 @@ use lettre::smtp::authentication::Credentials;
 use lettre::{SmtpClient, Transport};
 use lettre_email::{Email, EmailBuilder};
 use serde::Deserialize;
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{json, Value};
 use std::fs::File;
 use std::io::prelude::*;
 use std::{cmp, env};
@@ -36,21 +31,56 @@ use std::{cmp, env};
 use schedule_assistant::authentication::AuthenticationCache;
 use schedule_assistant::{current_rms, json, servicem8};
 
-fn calculate_window(activity: &Value, min_duration: Duration) -> (NaiveDateTime, chrono::Duration) {
-    // Calculate the start time
-    let start = Utc
-        .datetime_from_str(
-            activity["start_date"].as_str().unwrap(),
-            "%Y-%m-%d %H:%M:%S",
-        )
-        .unwrap();
-    let end = Utc
-        .datetime_from_str(activity["end_date"].as_str().unwrap(), "%Y-%m-%d %H:%M:%S")
-        .unwrap();
+// servicem8 uses a date format '%Y-%m-%d %H:%M:%S' which while DateTime
+// supports Serde out of the box, it uses the RFC3339 format so we need
+// to provide some custom logic to help it understand how to deserialize
+// our desired format.
+mod my_date_format {
+    use chrono::{DateTime, TimeZone, Utc};
+    use serde::{self, Deserialize, Deserializer, Serializer};
 
-    let duration = end.duration_round(Duration::minutes(30)).unwrap().time()
-        - start.duration_trunc(Duration::minutes(30)).unwrap().time();
-    (start.naive_local(), cmp::max(duration, min_duration))
+    const FORMAT: &'static str = "%Y-%m-%d %H:%M:%S";
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Utc.datetime_from_str(&s, FORMAT)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Deserialize)]
+struct JobActivity {
+    uuid: String,
+    job_uuid: String,
+    #[serde(with = "my_date_format")]
+    start_date: DateTime<Utc>, //< "%Y-%m-%d %H:%M:%S" format
+    #[serde(with = "my_date_format")]
+    end_date: DateTime<Utc>, //< "%Y-%m-%d %H:%M:%S" format
+}
+
+fn calculate_window(
+    activity: &JobActivity,
+    min_duration: Duration,
+) -> (NaiveDateTime, chrono::Duration) {
+    let end_time = activity
+        .end_date
+        .duration_round(Duration::minutes(30))
+        .unwrap()
+        .time();
+    let start_time = activity
+        .start_date
+        .duration_trunc(Duration::minutes(30))
+        .unwrap()
+        .time();
+    let duration = end_time - start_time;
+
+    (
+        activity.start_date.naive_local(),
+        cmp::max(duration, min_duration),
+    )
 }
 
 fn process_client_name(client: &Value) -> Option<Vec<String>> {
@@ -107,28 +137,26 @@ fn best_email(job: &Job, contacts: &Vec<Value>) -> Option<String> {
 fn populate_email_data_from_job(
     job: &Job,
     companies: &Vec<Value>,
-    activity_records: &Vec<Value>,
-) -> Option<HashMap<String, String>> {
+    activity_records: &Vec<JobActivity>,
+) -> Option<serde_json::Value> {
     // Sanitize and build client name.
     let client = find_by_attribute(&companies, "uuid", &job.company_uuid)?;
     let client_name = process_client_name(client)?;
 
     // Find all of the job_activities associated with this job.
-    let _activities: Vec<(NaiveDateTime, chrono::Duration)> = activity_records
+    let activities: Vec<(NaiveDateTime, NaiveDateTime)> = activity_records
         .iter()
-        .filter(|&a| a["job_uuid"].as_str().unwrap() == job.uuid)
-        .map(|a| calculate_window(&a, chrono::Duration::hours(2)))
+        .filter(|&a| a.job_uuid == job.uuid)
+        .map(|a| calculate_window(&a, chrono::Duration::hours(2))) //< (start, duration)
+        .map(|i| (i.0, i.0 + i.1)) //< (start, end)
         .collect();
 
     // Populate the template substitution data.
-    let mut data = HashMap::new();
-    //@todo: Insert the activities as strings?
-    // data.insert(
-    //     "activites".to_string(),
-    //     activities
-    // );
-    data.insert("job_address".to_string(), job.address.clone());
-    data.insert("first_name".to_string(), client_name[0].clone());
+    let data = json!({
+        "job_address": job.job_address,
+        "first_name": client_name[0],
+        "activities": activities
+    });
 
     Some(data)
 }
@@ -151,7 +179,7 @@ fn parse_command_line() -> (Date<Utc>, Date<Utc>) {
 struct Job {
     uuid: String,
     company_uuid: String,
-    address: String,
+    job_address: String,
 }
 
 fn query_relevant_jobs(
@@ -159,33 +187,28 @@ fn query_relevant_jobs(
     start_of_week: Date<Utc>,
     end_of_week: Date<Utc>,
 ) -> reqwest::Result<Vec<Job>> {
-    let activity_records: Vec<Value> = servicem8::job_activities(&auth_cache)?
+    let activity_records = servicem8::job_activities(&auth_cache)?
         .into_iter()
         .filter(servicem8::activity_is_active)
-        .collect::<Vec<Value>>();
+        .map(|a| serde_json::from_value(a).unwrap())
+        .collect::<Vec<JobActivity>>();
     let jobs = servicem8::jobs(&auth_cache)?;
 
     // Aggregate all the job id's of the activities that fall in the active window.
     let mut job_ids: Vec<String> = activity_records
         .iter()
         .filter(|&a| {
-            let start_date = json::date_from_value(a, "start_date", "%Y-%m-%d %H:%M:%S").unwrap();
-            let job_date = start_date.date();
+            let job_date = a.start_date.date();
             job_date >= start_of_week && job_date < end_of_week
         })
-        .map(|a| json::attribute_from_value(a, "job_uuid").unwrap())
+        .map(|a| a.job_uuid.clone())
         .collect();
 
     // Remove duplicates from the jobs_id list.
     job_ids.sort_unstable();
     job_ids.dedup();
-
     let found_jobs: Vec<Job> = jobs
         .into_iter()
-        .filter(|j| match j["uuid"].as_str() {
-            Some(uuid) => job_ids.iter().any(|id| id == uuid),
-            None => false,
-        })
         .map(|value| serde_json::from_value(value).unwrap())
         .collect();
 
@@ -198,8 +221,12 @@ fn populate_emails(
 ) -> anyhow::Result<Vec<Email>> {
     let contacts = servicem8::job_contacts(&auth_cache)?;
     let companies = servicem8::clients(&auth_cache)?;
-    let activity_records: Vec<Value> = servicem8::job_activities(&auth_cache)?; //< querying for these the second time, seems bad!
+    let activity_records = servicem8::job_activities(&auth_cache)?
+        .into_iter()
+        .map(|a| serde_json::from_value(a).unwrap())
+        .collect::<Vec<JobActivity>>(); //< querying for these the second time, seems bad!
     let _opportunities = current_rms::opportunities(&auth_cache)?;
+
     // Setup email template engine.
     let handlebars = Handlebars::new();
     let mut source_template = File::open(&"./templates/template.hbs")?; //< If we cant find the template file, panic.
@@ -209,15 +236,21 @@ fn populate_emails(
     let mut vec = Vec::new();
     for job in jobs {
         // Find the best email-address for the email.
-        let email = match best_email(job, &contacts) {
+        let email_address = match best_email(job, &contacts) {
             Some(data) => data,
-            None => continue,
+            None => {
+                println!("Unable to find email address for job");
+                continue;
+            }
         };
 
         // Populate the template substitution data.
         let data = match populate_email_data_from_job(job, &companies, &activity_records) {
             Some(data) => data,
-            None => continue,
+            None => {
+                println!("Unable to populate email data for job.");
+                continue;
+            }
         };
 
         // Create email html content
@@ -228,12 +261,13 @@ fn populate_emails(
                 continue;
             }
         };
+        
+        println!("{}", output);
 
         // Build the email
-        println!("Building email");
         let email_builder = EmailBuilder::new()
             .from(("hello@twofoxes.co.nz", "Two Foxes"))
-            .to(email) //< @todo: add an override for the delivery email for testing?
+            .to(email_address) //< @todo: add an override for the delivery email for testing?
             .subject("Delivery Confirmation")
             .html(output); //< Not going to worry about non HTML email clients at this stage.  What is this the 90's?
 
@@ -259,7 +293,9 @@ fn populate_emails(
         //         .unwrap();
         // };
 
+        println!("Building email");
         let email = email_builder.build()?;
+
         vec.push(email);
     }
 
