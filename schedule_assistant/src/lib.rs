@@ -1,5 +1,4 @@
 pub mod authentication;
-pub mod database;
 mod endpoints;
 pub mod json;
 mod macros;
@@ -187,19 +186,6 @@ pub fn check_bookings(
     start: Date<Utc>,
     end: Date<Utc>,
 ) -> reqwest::Result<Vec<Value>> {
-    // Panic's if we cant open the database.
-    let conn = database::connection().unwrap(); 
-
-    // PANIC:  Will panic if table is already created.
-    database::create_table(&conn).unwrap();
-    // PANIC:  Will panic if the person already exists in the table.
-    database::insert(&conn).unwrap();
-    // PANIC: If we are unable to query the database.
-    let people = database::query(&conn).unwrap();
-    for person in people {
-        println!("Found person {:?}", person);
-    }
-
     // Get Current-RMS opportunities.
     let opportunities = current_rms::opportunities(auth_cache)?
         .into_iter()

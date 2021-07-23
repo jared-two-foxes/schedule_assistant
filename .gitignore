@@ -6,7 +6,7 @@
 Rocket.toml
 
 # ignore test database
-.data
+.db
 
 # editor stuff
 .vscode
